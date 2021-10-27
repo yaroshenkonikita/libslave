@@ -1797,6 +1797,43 @@ namespace // anonymous
         BOOST_CHECK(ref6.front() == slave::gtid_interval_t(34, 34));
     }
 
+    void test_GtidFormatting()
+    {
+        slave::Position pos1;
+        BOOST_CHECK_EQUAL("'GTIDs=-'", pos1.str());
+        BOOST_CHECK_EQUAL("-", pos1.formatGtid());
+
+        const std::string uuid1Text = "24F7C945-C871-11E6-9461-0242AC110006";
+        slave::gtid_interval_list_t intervals;
+        intervals.push_back(slave::gtid_interval_t(100, 123));
+        intervals.push_back(slave::gtid_interval_t(200, 200));
+        pos1.gtid_executed[uuid1Text] = intervals;
+
+        BOOST_CHECK_EQUAL("24F7C945-C871-11E6-9461-0242AC110006:100-123:200", pos1.formatGtid());
+    }
+
+    void test_GtidIntersect()
+    {
+        slave::Position pos1;
+        const std::string uuid1Text = "24F7C945-C871-11E6-9461-0242AC110006";
+        slave::gtid_interval_list_t intervals1;
+        intervals1.push_back(slave::gtid_interval_t(100, 123));
+        intervals1.push_back(slave::gtid_interval_t(200, 200));
+        pos1.gtid_executed[uuid1Text] = intervals1;
+
+        slave::Position pos2;
+        slave::gtid_interval_list_t intervals2;
+        intervals2.push_back(slave::gtid_interval_t(120, 250));
+        pos2.gtid_executed[uuid1Text] = intervals2;
+        pos2.gtid_executed["24F7C945-C871-11E6-9461-0242AC110007"] = intervals1;
+
+        BOOST_CHECK_EQUAL("24F7C945-C871-11E6-9461-0242AC110006:120-250,"
+                          "24F7C945-C871-11E6-9461-0242AC110007:100-123:200", pos2.formatGtid());
+        pos2.shiftToThePast(pos1);
+        BOOST_CHECK_EQUAL("24F7C945-C871-11E6-9461-0242AC110006:120-123:200,"
+                          "24F7C945-C871-11E6-9461-0242AC110007:100-123:200", pos2.formatGtid());
+    }
+
     void test_GtidAdding()
     {
         slave::Position pos;
@@ -1997,6 +2034,8 @@ test_suite* init_unit_test_suite(int argc, char* argv[])
     ADD_FIXTURE_TEST(test_AlterCreateTable);
     ADD_FIXTURE_TEST(test_RenameTable);
     ADD_FIXTURE_TEST(test_GtidParsing);
+    ADD_FIXTURE_TEST(test_GtidFormatting);
+    ADD_FIXTURE_TEST(test_GtidIntersect);
     ADD_FIXTURE_TEST(test_GtidAdding);
     ADD_FIXTURE_TEST(test_GtidReached);
     ADD_FIXTURE_TEST(test_Decimal);

@@ -102,6 +102,8 @@ public:
         ext_state.setMasterPosition(_master_info.position);
     }
 
+    bool gtidModeEnabled() const { return m_gtid_enabled; }
+
     void linkEventStat(EventStatIface* _event_stat)
     {
         event_stat = _event_stat;
