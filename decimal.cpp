@@ -113,7 +113,12 @@ std::string slave::decimal::to_string(const Decimal& d)
         auto x = *idigits.begin();
         intg_len -= count_leading_zeroes(x.second, x.first);
     }
-    size_t len = intg_len + d.frac + d.sign + (0 == intg_len ? 1 : 0) + (0 != d.frac ? 1 : 0);
+    // unsigned because with size_t -Werror=alloca-larger-than gives an error with gcc 10.2.0.
+    // I don't know why.
+    unsigned len = intg_len + d.frac + d.sign + (0 == intg_len ? 1 : 0) + (0 != d.frac ? 1 : 0);
+
+    if (len > 0xffff)
+        return "slave::decimal::to_string: len is too big = " + std::to_string(len);
 
     char* buf = reinterpret_cast<char*>(alloca(len));
     char *s = buf;

@@ -114,6 +114,54 @@ void parse_list_cont(const std::string& aList, Cont& aCont, const char* delim = 
 namespace slave
 {
 
+// find the intersection of two transaction intervals
+gtid_interval_t intersectIntervals(const gtid_interval_t& x, const gtid_interval_t& y)
+{
+    // if any given interval is empty - the result is empty too
+    if (isIntervalEmpty(x) || isIntervalEmpty(y))
+        return makeEmptyInterval();
+    // check if there's no intersection
+    if (x.second < y.first || y.second < x.first)
+        return makeEmptyInterval();
+    return gtid_interval_t(std::max(x.first, y.first), std::min(x.second, y.second));
+}
+
+// find the intersection of two lists of transaction intervals
+gtid_interval_list_t intersectIntervalsLists(const gtid_interval_list_t& x, const gtid_interval_list_t& y)
+{
+    gtid_interval_list_t result;
+    // straightforward implementation here, time complexity is O(N*M)
+    // should be OK, since N and M aren't expected to differ greatly from 1
+    for (const auto& x_interval : x)
+    {
+        for (const auto& y_interval : y)
+        {
+            auto z_interval = intersectIntervals(x_interval, y_interval);
+            if (!isIntervalEmpty(z_interval))
+                result.push_back(z_interval);
+        }
+    }
+    return result;
+}
+
+// find the intersection of two GTID sets,
+// not very useful per se, see Position::shiftToThePast() instead
+gtid_set_t intersectGtidSets(const gtid_set_t& x, const gtid_set_t& y)
+{
+    gtid_set_t result;
+    for (const auto& [x_source, x_transactions] : x)
+    {
+        auto y_it = y.find(x_source);
+        if (y.end() != y_it)
+        {
+            auto z_transactions = intersectIntervalsLists(x_transactions, y_it->second);
+            if (!z_transactions.empty())
+                result.emplace(x_source, z_transactions);
+        }
+    }
+    return result;
+}
+
 // parseGtid parse string with gtid
 // example:  ae00751a-cb5f-11e6-9d92-e03f490fd3db:1-12:15-17
 // gtid_set: uuid_set [, uuid_set] ... | ''
@@ -250,6 +298,24 @@ void Position::encodeGtid(unsigned char* buf)
     }
 }
 
+// This method helps to rewind the current position of the client
+// back to as early in time as specified by another position,
+// which is typically received from a client reading some other replica.
+// In this situation we have to avoid adding any new sources,
+// that our client's replica isn't aware of, or binlog request will fail.
+void Position::shiftToThePast(const Position &other)
+{
+    if (gtid_executed.empty() || other.gtid_executed.empty())
+        throw std::runtime_error("Both positions should contain GTIDs");
+    auto result = intersectGtidSets(gtid_executed, other.gtid_executed);
+    for (const auto& [x_source, x_transactions] : gtid_executed)
+    {
+        if (result.end() == result.find(x_source))
+            result[x_source] = x_transactions;
+    }
+    std::swap(result, gtid_executed);
+}
+
 bool Position::reachedOtherPos(const Position& other) const
 {
     if (gtid_executed.empty() && other.gtid_executed.empty())
@@ -312,13 +378,16 @@ std::string Position::str() const
     if (!log_name.empty() && log_pos)
         result += log_name + ":" + std::to_string(log_pos) + ", ";
 
-    result += "GTIDs=";
-    if (gtid_executed.empty())
-    {
-        result += "-'";
-        return result;
-    }
+    result += "GTIDs=" + formatGtid() + "'";
+    return result;
+}
 
+std::string Position::formatGtid() const
+{
+    if (gtid_executed.empty())
+        return "-";
+
+    std::string result;
     bool first_a = true;
     for (const auto& gtid : gtid_executed)
     {
@@ -341,7 +410,6 @@ std::string Position::str() const
                 result += "-" + std::to_string(interv.second);
         }
     }
-    result += "'";
     return result;
 }
 
