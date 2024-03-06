@@ -50,7 +50,7 @@ public:
         m_map_table_name[table_id] = {db_name, table_name};
     }
 
-    TableKey getTableNameById(int table_id) const
+    TableKey getTableNameById(unsigned long table_id) const
     {
         id_to_name_t::const_iterator p = m_map_table_name.find(table_id);
 
