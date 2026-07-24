@@ -22,6 +22,8 @@
 #define __SLAVE_SLAVE_H_
 
 
+#include <atomic>
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -62,7 +64,7 @@ private:
 
     MYSQL mysql;
 
-    int m_server_id;
+    std::atomic<std::uint32_t> m_server_id{0};
     int m_master_version = 0;
 
     MasterInfo m_master_info;
@@ -174,7 +176,7 @@ public:
 
     void init();
 
-    int serverId() const { return m_server_id; }
+    std::uint32_t serverId() const { return m_server_id.load(std::memory_order_relaxed); }
     int masterVersion() const { return m_master_version; }
     bool masterGe56() const { return m_master_version >= 50600; }
 

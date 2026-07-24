@@ -14,7 +14,9 @@
 
 
 #include <algorithm>
+#include <limits>
 #include <memory>
+#include <random>
 #include <regex>
 #include <string>
 
@@ -104,6 +106,12 @@ void sigUnblock(int signal)
     if (0 != ::pthread_sigmask(SIG_UNBLOCK, &sigSet, nullptr))
         LOG_ERROR(log, "Can't unblock signal: " << errno);
 }
+
+class DuplicateServerIdError: public std::runtime_error
+{
+public:
+    using std::runtime_error::runtime_error;
+};
 }// anonymous-namespace
 
 
@@ -546,9 +554,8 @@ void Slave::get_remote_binlog(const std::function<bool()>& _interruptFlag)
 
     //connect_to_master(false, &mysql);
 
-    register_slave_on_master(&mysql);
-
 connected:
+    register_slave_on_master(&mysql);
     do_checksum_handshake(&mysql);
 
     // Get binlog position saved in ext_state before, or load it
@@ -589,7 +596,16 @@ connected:
 
                 ev_logger_hb_skip.flush_hb();
 
-                uint mysql_error_number = mysql_errno(&mysql);
+                const uint mysql_error_number = mysql_errno(&mysql);
+                const std::string mysql_error_message = mysql_error(&mysql);
+
+                if (mysql_error_number == ER_MASTER_FATAL_ERROR_READING_BINLOG
+                    && mysql_error_message.find("same server_uuid/server_id") != std::string::npos)
+                {
+                    throw DuplicateServerIdError(
+                        "Myslave: duplicate replication server ID " + std::to_string(serverId())
+                        + ": " + mysql_error_message);
+                }
 
                 switch(mysql_error_number) {
                     case ER_NET_PACKET_TOO_LARGE:
@@ -598,7 +614,7 @@ connected:
                                   "max_allowed_packet. max_allowed_packet=" << mysql_error(&mysql) );
                         break;
                     case ER_MASTER_FATAL_ERROR_READING_BINLOG: // Error -- unknown binlog file.
-                        LOG_ERROR(log, "Myslave: fatal error reading binlog. " <<  mysql_error(&mysql) );
+                        LOG_ERROR(log, "Myslave: fatal error reading binlog. " << mysql_error_message);
                         break;
                     case 2013: // Processing error 'Lost connection to MySQL'
                         LOG_WARNING(log, "Myslave: Error from MySQL: " << mysql_error(&mysql) );
@@ -725,6 +741,16 @@ connected:
 
 
 
+        } catch (const DuplicateServerIdError&) {
+            const std::uint32_t old_server_id = serverId();
+            const std::uint32_t new_server_id = old_server_id == std::numeric_limits<std::uint32_t>::max()
+                ? 1
+                : old_server_id + 1;
+            m_server_id.store(new_server_id, std::memory_order_relaxed);
+            LOG_WARNING(log, "Myslave: duplicate replication server ID " << old_server_id
+                        << "; retrying with server ID " << new_server_id);
+            __conn.connect(true);
+            goto connected;
         } catch (const std::exception& _ex ) {
 
             LOG_ERROR(log, "Met exception in get_remote_binlog cycle. Message: " << _ex.what() );
@@ -758,9 +784,10 @@ void Slave::register_slave_on_master(MYSQL* mysql)
     report_user_len= strlen(report_user);
     report_password_len= strlen(report_password);
 
-    LOG_DEBUG(log, "Registering slave on master: m_server_id = " << m_server_id << "...");
+    const std::uint32_t server_id = serverId();
+    LOG_DEBUG(log, "Registering slave on master: m_server_id = " << server_id << "...");
 
-    int4store(pos, m_server_id);
+    int4store(pos, server_id);
     pos+= 4;
     pos= net_store_data(pos, (uchar*)report_host.c_str(), report_host.size());
     pos= net_store_data(pos, (uchar*)report_user, report_user_len);
@@ -786,7 +813,7 @@ void Slave::register_slave_on_master(MYSQL* mysql)
 
 void Slave::deregister_slave_on_master(MYSQL* mysql)
 {
-    LOG_DEBUG(log, "Deregistering slave on master: m_server_id = " << m_server_id << "...");
+    LOG_DEBUG(log, "Deregistering slave on master: m_server_id = " << serverId() << "...");
     // Last '1' means 'no checking', otherwise command can hung
     simple_command(mysql, COM_QUIT, 0, 0, 1);
 }
@@ -1110,7 +1137,7 @@ void Slave::request_dump_wo_gtid(const std::string& logname, unsigned long start
     int2store(buf + BIN_LOG_HEADER_SIZE, binlog_flags);
 
     uint logname_len = logname.size();
-    int4store(buf + 6, m_server_id);
+    int4store(buf + 6, serverId());
 
     memcpy(buf + 10, logname.data(), logname_len);
 
@@ -1135,7 +1162,7 @@ void Slave::request_dump(const Position& pos, MYSQL* mysql)
 
         // https://dev.mysql.com/doc/internals/en/com-binlog-dump-gtid.html
         int2store(buf, 4);  // 4 - BINLOG_THROUGH_GTID
-        int4store(buf + 2, m_server_id);
+        int4store(buf + 2, serverId());
         int4store(buf + 6, 0);
         int8store(buf + 10, 4LL);
 
@@ -1169,7 +1196,7 @@ ulong Slave::read_event(MYSQL* mysql)
 #endif
 
     if (len == packet_error) {
-        LOG_ERROR(log, "Myslave: Error reading packet from server: " << mysql_error(mysql)
+        LOG_ERROR(log, "Myslave: Error reading binlog: " << mysql_error(mysql)
                   << "; mysql_error: " << mysql_errno(mysql));
 
         return packet_error;
@@ -1187,42 +1214,12 @@ ulong Slave::read_event(MYSQL* mysql)
 
 void Slave::generateSlaveId()
 {
-
-    std::set<unsigned int> server_ids;
-
-    nanomysql::Connection conn(m_master_info.conn_options);
-    nanomysql::Connection::result_t res;
-
-    conn.query("SHOW SLAVE HOSTS");
-    conn.store(res);
-
-    for (nanomysql::Connection::result_t::const_iterator i = res.begin(); i != res.end(); ++i) {
-
-        //row[0] - server_id
-
-        std::map<std::string,nanomysql::field>::const_iterator z = i->find("Server_id");
-
-        if (z == i->end())
-            throw std::runtime_error("Slave::create_table(): SHOW SLAVE HOSTS query did not return 'Server_id'");
-
-        server_ids.insert(::strtoul(z->second.data.c_str(), NULL, 10));
-    }
-
-    unsigned int serveroid = ::time(NULL);
-    serveroid ^= (::getpid() << 16);
-
-    while (1) {
-
-        if (server_ids.count(serveroid) != 0) {
-            serveroid++;
-        } else {
-            break;
-        }
-    }
-
-    m_server_id = serveroid;
-
-    LOG_DEBUG(log, "Generated m_server_id = " << m_server_id);
+    std::random_device random_device;
+    std::uniform_int_distribution<std::uint32_t> distribution(
+        1, std::numeric_limits<std::uint32_t>::max());
+    const std::uint32_t server_id = distribution(random_device);
+    m_server_id.store(server_id, std::memory_order_relaxed);
+    LOG_DEBUG(log, "Generated m_server_id = " << server_id);
 }
 
 Position Slave::getLastBinlogPos() const
