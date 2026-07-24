@@ -103,6 +103,7 @@ public:
     }
 
     bool gtidModeEnabled() const { return m_gtid_enabled; }
+	void enableGtid(bool on = true);
 
     void linkEventStat(EventStatIface* _event_stat)
     {
