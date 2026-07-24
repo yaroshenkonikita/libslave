@@ -104,6 +104,12 @@ void sigUnblock(int signal)
     if (0 != ::pthread_sigmask(SIG_UNBLOCK, &sigSet, nullptr))
         LOG_ERROR(log, "Can't unblock signal: " << errno);
 }
+
+class DuplicateServerIdError: public std::runtime_error
+{
+public:
+    using std::runtime_error::runtime_error;
+};
 }// anonymous-namespace
 
 
@@ -589,7 +595,16 @@ connected:
 
                 ev_logger_hb_skip.flush_hb();
 
-                uint mysql_error_number = mysql_errno(&mysql);
+                const uint mysql_error_number = mysql_errno(&mysql);
+                const std::string mysql_error_message = mysql_error(&mysql);
+
+                if (mysql_error_number == ER_MASTER_FATAL_ERROR_READING_BINLOG
+                    && mysql_error_message.find("same server_uuid/server_id") != std::string::npos)
+                {
+                    throw DuplicateServerIdError(
+                        "Myslave: duplicate replication server ID " + std::to_string(m_server_id)
+                        + ": " + mysql_error_message);
+                }
 
                 switch(mysql_error_number) {
                     case ER_NET_PACKET_TOO_LARGE:
@@ -598,7 +613,7 @@ connected:
                                   "max_allowed_packet. max_allowed_packet=" << mysql_error(&mysql) );
                         break;
                     case ER_MASTER_FATAL_ERROR_READING_BINLOG: // Error -- unknown binlog file.
-                        LOG_ERROR(log, "Myslave: fatal error reading binlog. " <<  mysql_error(&mysql) );
+                        LOG_ERROR(log, "Myslave: fatal error reading binlog. " << mysql_error_message);
                         break;
                     case 2013: // Processing error 'Lost connection to MySQL'
                         LOG_WARNING(log, "Myslave: Error from MySQL: " << mysql_error(&mysql) );
@@ -725,6 +740,8 @@ connected:
 
 
 
+        } catch (const DuplicateServerIdError&) {
+            throw;
         } catch (const std::exception& _ex ) {
 
             LOG_ERROR(log, "Met exception in get_remote_binlog cycle. Message: " << _ex.what() );
