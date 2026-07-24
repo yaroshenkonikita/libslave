@@ -740,8 +740,11 @@ connected:
 
 
 
-        } catch (const DuplicateServerIdError&) {
-            throw;
+        } catch (const DuplicateServerIdError& _ex) {
+            LOG_WARNING(log, _ex.what() << ". Regenerating server ID");
+            m_server_id++;
+            __conn.connect(true);
+            goto connected;
         } catch (const std::exception& _ex ) {
 
             LOG_ERROR(log, "Met exception in get_remote_binlog cycle. Message: " << _ex.what() );
@@ -1204,42 +1207,8 @@ ulong Slave::read_event(MYSQL* mysql)
 
 void Slave::generateSlaveId()
 {
-
-    std::set<unsigned int> server_ids;
-
-    nanomysql::Connection conn(m_master_info.conn_options);
-    nanomysql::Connection::result_t res;
-
-    conn.query("SHOW SLAVE HOSTS");
-    conn.store(res);
-
-    for (nanomysql::Connection::result_t::const_iterator i = res.begin(); i != res.end(); ++i) {
-
-        //row[0] - server_id
-
-        std::map<std::string,nanomysql::field>::const_iterator z = i->find("Server_id");
-
-        if (z == i->end())
-            throw std::runtime_error("Slave::create_table(): SHOW SLAVE HOSTS query did not return 'Server_id'");
-
-        server_ids.insert(::strtoul(z->second.data.c_str(), NULL, 10));
-    }
-
-    unsigned int serveroid = ::time(NULL);
-    serveroid ^= (::getpid() << 16);
-
-    while (1) {
-
-        if (server_ids.count(serveroid) != 0) {
-            serveroid++;
-        } else {
-            break;
-        }
-    }
-
-    m_server_id = serveroid;
-
-    LOG_DEBUG(log, "Generated m_server_id = " << m_server_id);
+    m_server_id = 1;
+    LOG_DEBUG(log, "Initialized m_server_id = " << m_server_id);
 }
 
 Position Slave::getLastBinlogPos() const
