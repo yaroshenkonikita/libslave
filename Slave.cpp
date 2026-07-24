@@ -141,6 +141,12 @@ void Slave::close_connection()
     }
 }
 
+void Slave::enableGtid(bool on)
+{
+    if (on && !m_master_info.gtid_mode)
+		throw std::runtime_error("Trying to enable gtid on libslave while gtid_mode is disabled on master");
+    m_gtid_enabled = on;
+}
 
 void Slave::createDatabaseStructure_(table_order_t& tabs, RelayLogInfo& rli) const
 {
