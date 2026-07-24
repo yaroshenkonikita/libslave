@@ -14,7 +14,9 @@
 
 
 #include <algorithm>
+#include <limits>
 #include <memory>
+#include <random>
 #include <regex>
 #include <string>
 
@@ -104,6 +106,12 @@ void sigUnblock(int signal)
     if (0 != ::pthread_sigmask(SIG_UNBLOCK, &sigSet, nullptr))
         LOG_ERROR(log, "Can't unblock signal: " << errno);
 }
+
+class DuplicateServerIdError: public std::runtime_error
+{
+public:
+    using std::runtime_error::runtime_error;
+};
 }// anonymous-namespace
 
 
@@ -589,7 +597,16 @@ connected:
 
                 ev_logger_hb_skip.flush_hb();
 
-                uint mysql_error_number = mysql_errno(&mysql);
+                const uint mysql_error_number = mysql_errno(&mysql);
+                const std::string mysql_error_message = mysql_error(&mysql);
+
+                if (mysql_error_number == ER_MASTER_FATAL_ERROR_READING_BINLOG
+                    && mysql_error_message.find("same server_uuid/server_id") != std::string::npos)
+                {
+                    throw DuplicateServerIdError(
+                        "Myslave: duplicate replication server ID " + std::to_string(m_server_id)
+                        + ": " + mysql_error_message);
+                }
 
                 switch(mysql_error_number) {
                     case ER_NET_PACKET_TOO_LARGE:
@@ -598,7 +615,7 @@ connected:
                                   "max_allowed_packet. max_allowed_packet=" << mysql_error(&mysql) );
                         break;
                     case ER_MASTER_FATAL_ERROR_READING_BINLOG: // Error -- unknown binlog file.
-                        LOG_ERROR(log, "Myslave: fatal error reading binlog. " <<  mysql_error(&mysql) );
+                        LOG_ERROR(log, "Myslave: fatal error reading binlog. " << mysql_error_message);
                         break;
                     case 2013: // Processing error 'Lost connection to MySQL'
                         LOG_WARNING(log, "Myslave: Error from MySQL: " << mysql_error(&mysql) );
@@ -725,6 +742,13 @@ connected:
 
 
 
+        } catch (const DuplicateServerIdError&) {
+            const int old_server_id = m_server_id;
+            m_server_id++;
+            LOG_WARNING(log, "Myslave: duplicate replication server ID " << old_server_id
+                        << "; retrying with server ID " << m_server_id);
+            __conn.connect(true);
+            goto connected;
         } catch (const std::exception& _ex ) {
 
             LOG_ERROR(log, "Met exception in get_remote_binlog cycle. Message: " << _ex.what() );
@@ -1169,7 +1193,7 @@ ulong Slave::read_event(MYSQL* mysql)
 #endif
 
     if (len == packet_error) {
-        LOG_ERROR(log, "Myslave: Error reading packet from server: " << mysql_error(mysql)
+        LOG_ERROR(log, "Myslave: Error reading binlog: " << mysql_error(mysql)
                   << "; mysql_error: " << mysql_errno(mysql));
 
         return packet_error;
@@ -1187,41 +1211,9 @@ ulong Slave::read_event(MYSQL* mysql)
 
 void Slave::generateSlaveId()
 {
-
-    std::set<unsigned int> server_ids;
-
-    nanomysql::Connection conn(m_master_info.conn_options);
-    nanomysql::Connection::result_t res;
-
-    conn.query("SHOW SLAVE HOSTS");
-    conn.store(res);
-
-    for (nanomysql::Connection::result_t::const_iterator i = res.begin(); i != res.end(); ++i) {
-
-        //row[0] - server_id
-
-        std::map<std::string,nanomysql::field>::const_iterator z = i->find("Server_id");
-
-        if (z == i->end())
-            throw std::runtime_error("Slave::create_table(): SHOW SLAVE HOSTS query did not return 'Server_id'");
-
-        server_ids.insert(::strtoul(z->second.data.c_str(), NULL, 10));
-    }
-
-    unsigned int serveroid = ::time(NULL);
-    serveroid ^= (::getpid() << 16);
-
-    while (1) {
-
-        if (server_ids.count(serveroid) != 0) {
-            serveroid++;
-        } else {
-            break;
-        }
-    }
-
-    m_server_id = serveroid;
-
+    std::random_device random_device;
+    std::uniform_int_distribution<int> distribution(1, std::numeric_limits<int>::max() - 1);
+    m_server_id = distribution(random_device);
     LOG_DEBUG(log, "Generated m_server_id = " << m_server_id);
 }
 
