@@ -740,9 +740,11 @@ connected:
 
 
 
-        } catch (const DuplicateServerIdError& _ex) {
-            LOG_WARNING(log, _ex.what() << ". Regenerating server ID");
+        } catch (const DuplicateServerIdError&) {
+            const int old_server_id = m_server_id;
             m_server_id++;
+            LOG_WARNING(log, "Myslave: duplicate replication server ID " << old_server_id
+                        << "; retrying with server ID " << m_server_id);
             __conn.connect(true);
             goto connected;
         } catch (const std::exception& _ex ) {
@@ -1189,7 +1191,7 @@ ulong Slave::read_event(MYSQL* mysql)
 #endif
 
     if (len == packet_error) {
-        LOG_ERROR(log, "Myslave: Error reading packet from server: " << mysql_error(mysql)
+        LOG_ERROR(log, "Myslave: Error reading binlog: " << mysql_error(mysql)
                   << "; mysql_error: " << mysql_errno(mysql));
 
         return packet_error;
