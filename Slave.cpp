@@ -554,9 +554,8 @@ void Slave::get_remote_binlog(const std::function<bool()>& _interruptFlag)
 
     //connect_to_master(false, &mysql);
 
-    register_slave_on_master(&mysql);
-
 connected:
+    register_slave_on_master(&mysql);
     do_checksum_handshake(&mysql);
 
     // Get binlog position saved in ext_state before, or load it
@@ -604,7 +603,7 @@ connected:
                     && mysql_error_message.find("same server_uuid/server_id") != std::string::npos)
                 {
                     throw DuplicateServerIdError(
-                        "Myslave: duplicate replication server ID " + std::to_string(m_server_id)
+                        "Myslave: duplicate replication server ID " + std::to_string(serverId())
                         + ": " + mysql_error_message);
                 }
 
@@ -743,10 +742,13 @@ connected:
 
 
         } catch (const DuplicateServerIdError&) {
-            const int old_server_id = m_server_id;
-            m_server_id++;
+            const std::uint32_t old_server_id = serverId();
+            const std::uint32_t new_server_id = old_server_id == std::numeric_limits<std::uint32_t>::max()
+                ? 1
+                : old_server_id + 1;
+            m_server_id.store(new_server_id, std::memory_order_relaxed);
             LOG_WARNING(log, "Myslave: duplicate replication server ID " << old_server_id
-                        << "; retrying with server ID " << m_server_id);
+                        << "; retrying with server ID " << new_server_id);
             __conn.connect(true);
             goto connected;
         } catch (const std::exception& _ex ) {
@@ -782,9 +784,10 @@ void Slave::register_slave_on_master(MYSQL* mysql)
     report_user_len= strlen(report_user);
     report_password_len= strlen(report_password);
 
-    LOG_DEBUG(log, "Registering slave on master: m_server_id = " << m_server_id << "...");
+    const std::uint32_t server_id = serverId();
+    LOG_DEBUG(log, "Registering slave on master: m_server_id = " << server_id << "...");
 
-    int4store(pos, m_server_id);
+    int4store(pos, server_id);
     pos+= 4;
     pos= net_store_data(pos, (uchar*)report_host.c_str(), report_host.size());
     pos= net_store_data(pos, (uchar*)report_user, report_user_len);
@@ -810,7 +813,7 @@ void Slave::register_slave_on_master(MYSQL* mysql)
 
 void Slave::deregister_slave_on_master(MYSQL* mysql)
 {
-    LOG_DEBUG(log, "Deregistering slave on master: m_server_id = " << m_server_id << "...");
+    LOG_DEBUG(log, "Deregistering slave on master: m_server_id = " << serverId() << "...");
     // Last '1' means 'no checking', otherwise command can hung
     simple_command(mysql, COM_QUIT, 0, 0, 1);
 }
@@ -1134,7 +1137,7 @@ void Slave::request_dump_wo_gtid(const std::string& logname, unsigned long start
     int2store(buf + BIN_LOG_HEADER_SIZE, binlog_flags);
 
     uint logname_len = logname.size();
-    int4store(buf + 6, m_server_id);
+    int4store(buf + 6, serverId());
 
     memcpy(buf + 10, logname.data(), logname_len);
 
@@ -1159,7 +1162,7 @@ void Slave::request_dump(const Position& pos, MYSQL* mysql)
 
         // https://dev.mysql.com/doc/internals/en/com-binlog-dump-gtid.html
         int2store(buf, 4);  // 4 - BINLOG_THROUGH_GTID
-        int4store(buf + 2, m_server_id);
+        int4store(buf + 2, serverId());
         int4store(buf + 6, 0);
         int8store(buf + 10, 4LL);
 
@@ -1212,9 +1215,11 @@ ulong Slave::read_event(MYSQL* mysql)
 void Slave::generateSlaveId()
 {
     std::random_device random_device;
-    std::uniform_int_distribution<int> distribution(1, std::numeric_limits<int>::max() - 1);
-    m_server_id = distribution(random_device);
-    LOG_DEBUG(log, "Generated m_server_id = " << m_server_id);
+    std::uniform_int_distribution<std::uint32_t> distribution(
+        1, std::numeric_limits<std::uint32_t>::max());
+    const std::uint32_t server_id = distribution(random_device);
+    m_server_id.store(server_id, std::memory_order_relaxed);
+    LOG_DEBUG(log, "Generated m_server_id = " << server_id);
 }
 
 Position Slave::getLastBinlogPos() const
