@@ -743,7 +743,7 @@ connected:
 
         } catch (const DuplicateServerIdError&) {
             const std::uint32_t old_server_id = serverId();
-            const std::uint32_t new_server_id = old_server_id == std::numeric_limits<std::uint32_t>::max()
+            const std::uint32_t new_server_id = old_server_id == (std::numeric_limits<std::uint32_t>::max)()
                 ? 1
                 : old_server_id + 1;
             m_server_id.store(new_server_id, std::memory_order_relaxed);
@@ -1216,7 +1216,7 @@ void Slave::generateSlaveId()
 {
     std::random_device random_device;
     std::uniform_int_distribution<std::uint32_t> distribution(
-        1, std::numeric_limits<std::uint32_t>::max());
+        1, (std::numeric_limits<std::uint32_t>::max)());
     const std::uint32_t server_id = distribution(random_device);
     m_server_id.store(server_id, std::memory_order_relaxed);
     LOG_DEBUG(log, "Generated m_server_id = " << server_id);
